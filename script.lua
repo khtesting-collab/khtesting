@@ -76876,19 +76876,45 @@ end)()
 end
 ]====],
 }
+
 local _modules, _errors = {}, {}
+
+-- Load engine modules only. The main program is handled separately.
 for _name, _source in pairs(_sources) do
-    local _chunk, _err = _compile(_source, '@RoClothes/' .. _name)
-    if not _chunk then
-        _errors[#_errors+1] = _name .. ': ' .. tostring(_err)
-    else
-        local _ok, _factory = pcall(_chunk)
-        if _ok and type(_factory) == 'function' then _modules[_name] = _factory
-        else _errors[#_errors+1] = _name .. ': did not return a module factory' end
+    if _name ~= "main" then
+        local _chunk, _err = _compile(_source, '@RoClothes/' .. _name)
+
+        if not _chunk then
+            _errors[#_errors+1] = _name .. ': ' .. tostring(_err)
+        else
+            local _ok, _factory = pcall(_chunk)
+
+            if _ok and type(_factory) == 'function' then
+                _modules[_name] = _factory
+            else
+                _errors[#_errors+1] =
+                    _name .. ': did not return a module factory'
+            end
+        end
     end
 end
-if #_errors > 0 then warn('[RoClothes] Bundled module errors: ' .. table.concat(_errors, ' | ')); return end
+
+if #_errors > 0 then
+    warn('[RoClothes] Bundled module errors: ' ..
+        table.concat(_errors, ' | '))
+    return
+end
+
+-- Compile and start the main program separately.
 local _main, _mainErr = _compile(_sources.main, '@RoClothes/main')
-if not _main then warn('[RoClothes] Main compile failed: ' .. tostring(_mainErr)); return end
+
+if not _main then
+    warn('[RoClothes] Main compile failed: ' .. tostring(_mainErr))
+    return
+end
+
 local _ok, _err = pcall(_main, _modules)
-if not _ok then warn('[RoClothes] Startup failed: ' .. tostring(_err)) end
+
+if not _ok then
+    warn('[RoClothes] Startup failed: ' .. tostring(_err))
+end
