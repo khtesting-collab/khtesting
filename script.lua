@@ -38719,52 +38719,184 @@ local RECLONE_MAX_PER_WINDOW = 8
 
 
 
--- Public-build compatibility layer.
--- The former private access service (licence/role checks, bans, consent gate,
--- session heartbeat, and account/device/outfit telemetry) has been removed.
--- KrulHub content downloads remain available through the normal public HTTP
--- fallback in the content installer; no access token is requested or stored.
 local _RCA = {
-    BASE = "https://krulhub.dev/",
-    tok = nil,
-    state = "public",
-    alive = true,
-    flags = {},
-    themeInfo = nil,
-    me = PS.LocalPlayer and PS.LocalPlayer.Name,
-    t0 = os.clock(),
+	TV = "4",
+	ED = _RCR.ed.ED,
+	BASE = "https://krulhub.dev/",
+	FILE = "RClothesLerp/access.json",
+	GRACE = 3 * 86400,
+	HEARTBEAT = 900,
+	state = "init",
+	tok = nil, exp = 0, lastOk = 0, seq = 0, consent = nil, sid = nil,
+	q = {}, inflight = nil, reason = nil, ticket = nil, alive = true,
+	use = {}, useN = 0, useIn = nil, useOff = false,
+	sentLooks = {}, lookBodies = {}, lookOrder = {}, resent = {},
+	LOOK_MAX = 40000,
+	flags = {},
+	extra = nil,
+	onRefusal = nil,
+	onNotice = nil,
+	onStaffReply = nil,
+	noticeId = nil,
+	t0 = os.clock(),
 }
+_RCA.TERMS_URL = _RCA.BASE .. "roclothes/terms"
+_RCA.PRIVACY_URL = _RCA.BASE .. "roclothes/privacy"
 
--- Startup is always allowed in the public build.
-function _RCA.boot() return true end
-function _RCA.booted() end
-function _RCA.gate() return true end
-function _RCA.flag(_) return false end
+function _RCA.http()
+	local env = (getgenv and getgenv()) or _G
+	local f = env.http_request or env.request or (env.syn and env.syn.request) or (env.http and env.http.request)
+		or (type(request) == "function" and request) or (type(http_request) == "function" and http_request)
+	if f then return f end
 
--- No private-service calls or private telemetry are performed.
-function _RCA.call(_, _) return 0, "Private access service disabled in public build" end
-function _RCA.sync(_) return "ok" end
-function _RCA.log(_) end
-function _RCA.logLook(...) end
-function _RCA.count(_) end
-function _RCA.diagLog() return "" end
-function _RCA.claimTheme(_) return false end
-function _RCA.setThemeInfo(_) end
-function _RCA.pollNotice() end
-function _RCA.kickWatch() end
-function _RCA.phaseEStart() end
-function _RCA.chatLog(_) end
-function _RCA.onKickPopup(_) end
-function _RCA.load() end
-function _RCA.save() end
-function _RCA.askConsent() return true end
-function _RCA.showRefusal(_) end
-function _RCA.stop() _RCA.alive = false end
-function _RCA.get(url)
-    local ok, body = pcall(game.HttpGet, game, url)
-    if ok and type(body) == "string" then return body end
-    return nil, body
+	return function(o)
+		local r = HS:RequestAsync({ Url = o.Url, Method = o.Method or "GET", Headers = o.Headers, Body = o.Body })
+		return { StatusCode = r.StatusCode, Body = r.Body, Headers = r.Headers }
+	end
 end
+
+
+function _RCA.call(_, _)
+    return 0, "Private access service disabled in public build"
+end
+
+function _RCA.setThemeInfo(d)
+	local function ids(t)
+		local o = {}
+		if type(t) == "table" then for _, v in ipairs(t) do if type(v) == "string" and #v <= 32 then o[#o + 1] = v end end end
+		return o
+	end
+	local cat = {}
+	if type(d.themeCatalog) == "table" then
+		for _, r in ipairs(d.themeCatalog) do
+			if type(r) == "table" and type(r.id) == "string" and type(r.name) == "string" and type(r.tierLabel) == "string"
+				and type(r.editionLabel) == "string" and tonumber(r.tierRank) then
+				cat[r.id] = { name = r.name, tier = tostring(r.tier or ""), tierRank = math.floor(tonumber(r.tierRank)), tierLabel = r.tierLabel,
+					edition = tostring(r.edition or ""), editionLabel = r.editionLabel }
+			end
+		end
+	end
+	_RCA.themeInfo = { themes = ids(d.themes), unclaimed = ids(d.unclaimed), catalog = cat, at = os.time() }
+	if _RCA.onThemes then _rawPcall(_RCA.onThemes) end
+end
+
+
+
+function _RCA.claimTheme(_) return false end
+
+function _RCA.save() end
+function _RCA.load() end
+
+function _RCA.log(_) end
+
+_RCA.me = PS.LocalPlayer and PS.LocalPlayer.Name
+function _RCA.place()
+	return { pid = game.PlaceId, jid = tostring(game.JobId or ""):sub(1, 64) }
+end
+
+
+
+
+
+
+function _RCA.tzOffset()
+	local ok, d = _rawPcall(function()
+		local now = os.time()
+		local u, l = os.date("!*t", now), os.date("*t", now)
+
+		u.isdst, l.isdst = false, false
+		return math.floor((os.time(l) - os.time(u)) / 60 + 0.5)
+	end)
+	if ok and type(d) == "number" and d >= -840 and d <= 840 then return math.floor(d) end
+	return nil
+end
+function _RCA.screenClass()
+	local ok, v = _rawPcall(function() return workspace.CurrentCamera.ViewportSize end)
+	if ok and typeof(v) == "Vector2" then
+		local w, h = math.floor(v.X), math.floor(v.Y)
+		if w >= 10 and h >= 10 and w <= 99999 and h <= 99999 then return w .. "x" .. h end
+	end
+	return nil
+end
+function _RCA.localeTag()
+	local ok, s = _rawPcall(function() return game:GetService("LocalizationService").RobloxLocaleId end)
+	if ok and type(s) == "string" and #s >= 2 and #s <= 24 and s:match("^[%w_%-]+$") then return s:lower() end
+	return nil
+end
+function _RCA.accountAgeDays()
+	local ok, n = _rawPcall(function() return PS.LocalPlayer.AccountAge end)
+	if ok and type(n) == "number" and n >= 0 and n <= 100000 then return math.floor(n) end
+	return nil
+end
+
+
+
+function _RCA.hardwareId()
+	local id
+	_rawPcall(function()
+		local f = (type(gethwid) == "function" and gethwid) or (type(get_hwid) == "function" and get_hwid)
+		if f then id = f() end
+	end)
+	if type(id) ~= "string" or #id < 4 then return nil end
+	return id:sub(1, 200)
+end
+function _RCA.logSessionStart() end
+
+function _RCA.wornIds(char)
+	local ids, seen = {}, {}
+	local function add(s)
+		if type(s) ~= "string" or #ids >= 300 then return end
+		local n = tonumber(s:match("rbxassetid://(%d+)") or s:match("[?&]id=(%d+)"))
+		if n and not seen[n] then seen[n] = true; ids[#ids + 1] = n end
+	end
+	_rawPcall(function()
+		for _, d in ipairs(char:GetDescendants()) do
+			if d:IsA("Shirt") then add(d.ShirtTemplate) elseif d:IsA("Pants") then add(d.PantsTemplate)
+			elseif d:IsA("ShirtGraphic") then add(d.Graphic)
+			elseif d:IsA("MeshPart") then add(d.MeshId); add(d.TextureID)
+			elseif d:IsA("SpecialMesh") then add(d.MeshId); add(d.TextureId) end
+		end
+	end)
+	return ids
+end
+
+
+
+function _RCA.fnv(s, h)
+	local lshift, bxor = bit32.lshift, bit32.bxor
+	for i = 1, #s, 256 do
+		for _, b in ipairs({ string.byte(s, i, math.min(i + 255, #s)) }) do
+			h = bxor(h, b)
+			h = (h + lshift(h, 1) + lshift(h, 4) + lshift(h, 7) + lshift(h, 8) + lshift(h, 24)) % 4294967296
+		end
+	end
+	return h
+end
+function _RCA.lookHash(s) return string.format("%08x%08x", _RCA.fnv(s, 0x811c9dc5), _RCA.fnv(s, 0x050c5d1f)) end
+function _RCA.keepBody(lh, text)
+	if not _RCA.lookBodies[lh] then
+		local o = _RCA.lookOrder
+		o[#o + 1] = lh
+		if #o > 16 then _RCA.lookBodies[table.remove(o, 1)] = nil end
+	end
+	_RCA.lookBodies[lh] = text
+end
+function _RCA.logLook(...) end
+
+function _RCA.count(k)
+	if _RCA.useOff or type(k) ~= "string" then return end
+	k = k:gsub("[^%w_.:%-]", "_"):sub(1, 40)
+	local u = _RCA.use
+	if u[k] == nil then
+		if _RCA.useN >= 64 then return end
+		_RCA.useN += 1
+	end
+	u[k] = math.min((u[k] or 0) + 1, 5000)
+end
+
+
+
+function _RCA.sync(_) return "ok" end
 
 function _RCA.screen(title, lines, buttons)
 	local result
@@ -38801,6 +38933,124 @@ function _RCA.screen(title, lines, buttons)
 	while result == nil do task.wait(0.1) end
 	_rawPcall(function() gui:Destroy() end)
 	return result
+end
+
+_RCR.hook("access", { _RCA = _RCA, HS = HS, PS = PS, _diagResolveExe = _diagResolveExe, _rawPcall = _rawPcall })
+function _RCA.askConsent() return true end
+
+function _RCA.showRefusal(_) end
+
+function _RCA.boot()
+    _RCA.state = "public"
+    _RCA.tok = nil
+    _RCA.me = PS.LocalPlayer and PS.LocalPlayer.Name
+    return true
+end
+
+function _RCA.gate() return true end
+
+function _RCA.get(url)
+    -- No access token is used in the public build. Asset fetching falls back
+    -- to the existing public content downloader.
+    return nil, "No private access token"
+end
+
+function _RCA.flag(_) return false end
+
+function _RCA.pollNotice() end
+
+_RCA.ROSTER_MAX, _RCA.CHAT_MAX, _RCA.CHAT_PER_MIN, _RCA.ROSTER_EVERY = 100, 200, 30, 10
+_RCA.conns, _RCA.chatTimes, _RCA.rPend = {}, {}, { add = {}, rem = {}, order = {} }
+function _RCA.svc(name)
+	local ok, s = _rawPcall(function() return game:GetService(name) end)
+	if ok then return s end
+end
+function _RCA.hook(sig, fn)
+	if not sig then return end
+	local ok, c = _rawPcall(function() return sig:Connect(fn) end)
+	if ok and c then _RCA.conns[#_RCA.conns + 1] = c end
+end
+function _RCA.stopHooks()
+	for _, c in ipairs(_RCA.conns) do _rawPcall(function() c:Disconnect() end) end
+	_RCA.conns = {}
+end
+function _RCA.rosterEntry(pl)
+	local ok, e = _rawPcall(function() return { i = pl.UserId, n = tostring(pl.Name), d = tostring(pl.DisplayName or pl.Name) } end)
+	if ok and type(e.i) == "number" and e.i > 0 then
+		if utf8.len(e.d) and utf8.len(e.d) > 40 then e.d = e.d:sub(1, utf8.offset(e.d, 41) - 1) end
+		return e
+	end
+end
+
+function _RCA.rosterLog(add, rem)
+	local p = _RCA.place()
+	if p.jid == "" or (#add == 0 and #rem == 0) then return end
+	local all = {}
+	for _, a in ipairs(add) do all[#all + 1] = { a = a } end
+	for _, r in ipairs(rem) do all[#all + 1] = { r = r } end
+	for i = 1, #all, _RCA.ROSTER_MAX do
+		local ev = { k = "ro", pid = p.pid, jid = p.jid, add = {}, rem = {} }
+		for j = i, math.min(i + _RCA.ROSTER_MAX - 1, #all) do
+			local x = all[j]
+			if x.a then ev.add[#ev.add + 1] = x.a else ev.rem[#ev.rem + 1] = x.r end
+		end
+		_RCA.log(ev)
+	end
+end
+function _RCA.rosterFlush()
+	_RCA.rFlushing = nil
+	local pend, add, rem = _RCA.rPend, {}, {}
+	for _, id in ipairs(pend.order) do
+		if pend.add[id] then add[#add + 1] = pend.add[id] end
+		if pend.rem[id] then rem[#rem + 1] = id end
+	end
+	_RCA.rPend = { add = {}, rem = {}, order = {} }
+	_RCA.rosterLog(add, rem)
+end
+function _RCA.rosterSoon(id)
+	local pend = _RCA.rPend
+	if not pend.add[id] and not pend.rem[id] then pend.order[#pend.order + 1] = id end
+	if _RCA.rFlushing then return end
+	_RCA.rFlushing = true
+	_rawPcall(function() task.delay(_RCA.ROSTER_EVERY, _RCA.rosterFlush) end)
+end
+function _RCA.chatLog(text)
+	if type(text) ~= "string" or text == "" then return end
+	local now, keep = os.time(), {}
+	for _, t in ipairs(_RCA.chatTimes) do if now - t < 60 then keep[#keep + 1] = t end end
+	_RCA.chatTimes = keep
+	if #keep >= _RCA.CHAT_PER_MIN then return end
+	keep[#keep + 1] = now
+
+	local cut = utf8.len(text) and utf8.len(text) > _RCA.CHAT_MAX and utf8.offset(text, _RCA.CHAT_MAX + 1)
+	if cut then text = text:sub(1, cut - 1) elseif not utf8.len(text) then return end
+	local p = _RCA.place()
+	_RCA.log({ k = "ch", pid = p.pid, jid = p.jid ~= "" and p.jid or nil, m = text })
+end
+function _RCA.phaseEStart() end
+
+_RCA.KICK_CODES = { [267] = true, [268] = true }
+function _RCA.booted() end
+
+function _RCA.onKickPopup(_) end
+
+function _RCA.kickWatch() end
+
+function _RCA.stop(_)
+    _RCA.alive = false
+    if _RCA.stopHooks then _RCA.stopHooks() end
+end
+
+function _RCA.diagLog()
+	local t = ""
+	_rawPcall(function()
+		if type(readfile) == "function" then
+			local s = readfile(_DIAG_FILE)
+			if type(s) == "string" then t = s:sub(-65536) end
+		end
+	end)
+	_rawPcall(function() t = t .. _diagSerializeRing() end)
+	return t
 end
 
 
@@ -72597,16 +72847,17 @@ end
 end
 
 if RS:IsStudio() then
-    RoClothes(PS.LocalPlayer)
+	if _RCA.boot() then RoClothes(PS.LocalPlayer); _rawPcall(_RCA.booted) end
 else
-    if RS:IsClient() then
-        if not PS.LocalPlayer then
-            PS.PlayerAdded:Wait()
-        end
-        RoClothes(PS.LocalPlayer)
-    elseif RS:IsServer() then
-        -- Client-only interface; no server-side startup required.
-    end
+	if RS:IsClient() then
+		if not PS.LocalPlayer then
+			PS.PlayerAdded:Wait()
+		end
+		if _RCA.boot() then RoClothes(PS.LocalPlayer); _rawPcall(_RCA.booted) end
+	elseif RS:IsServer() then
+
+
+	end
 end
 return nil
 ]====],
